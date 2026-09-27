@@ -1,0 +1,204 @@
+# Production rule set. Every decision records ruleset name + version and each fired
+# rule's id, version and reason code. Scores add up (capped at 100); `thresholds`
+# escalate the action when the total score crosses them.
+ruleset: production
+version: "2026.09.1"
+thresholds:
+  review: 50
+  block: 90
+
+rules:
+  # ---------------------------------------------------------------- compliance
+  - id: SANCTIONS_HIT
+    description: Fuzzy match >= 90 against the synthetic sanctions list
+    when:
+      all: ["sanctions_score >= 90"]
+    action: block
+    severity: critical
+    reason: SANCTIONS_LIST_HIT
+    score: 100
+
+  - id: SANCTIONS_POTENTIAL
+    description: Potential sanctions match (80..90) -> manual review
+    when:
+      event: [registration, deposit_attempt, withdrawal_request]
+      all: ["sanctions_score >= 80", "sanctions_score < 90"]
+    action: review
+    severity: high
+    reason: SANCTIONS_POTENTIAL_MATCH
+    score: 40
+
+  - id: PEP_EDD
+    description: Probable PEP -> enhanced due diligence before money movement
+    when:
+      event: [registration, deposit_attempt, withdrawal_request]
+      all: ["pep_score >= 85", "kyc_status != passed_edd"]
+    action: step_up_kyc
+    severity: medium
+    reason: PEP_ENHANCED_DUE_DILIGENCE
+    score: 10
+
+  - id: RESTRICTED_GEO
+    description: Registration country outside the licensed perimeter (synthetic code XR)
+    when:
+      all: ["country in [XR]"]
+    action: block
+    severity: high
+    reason: RESTRICTED_JURISDICTION
+    score: 100
+
+  - id: KYC_BEFORE_WITHDRAWAL
+    version: 2
+    description: Withdrawal >= 500 without completed KYC
+    when:
+      event: withdrawal_request
+      all: ["kyc_status != passed", "amount >= 500"]
+    action: step_up_kyc
+    severity: medium
+    reason: KYC_REQUIRED_FOR_WITHDRAWAL
+    score: 20
+
+  # ---------------------------------------------------------------- payments fraud
+  - id: CARD_TESTING
+    version: 3
+    description: Burst of failed deposits with many cards or micro amounts
+    when:
+      event: deposit_attempt
+      all:
+        - "failed_deposits_1h >= 3"
+        - any: ["distinct_instruments_24h >= 3", "amount <= 5"]
+    action: block
+    severity: high
+    reason: CARD_TESTING_PATTERN
+    score: 60
+
+  - id: DEPOSIT_VELOCITY_1H
+    description: More than 6 deposit attempts in one hour
+    when:
+      event: deposit_attempt
+      all: ["deposits_1h > 6"]
+    action: review
+    severity: medium
+    reason: VELOCITY_DEPOSITS_1H
+    score: 25
+
+  - id: DEVICE_MANY_INSTRUMENTS
+    description: Device has seen 4+ distinct payment instruments (any player)
+    when:
+      event: [deposit_attempt, withdrawal_request]
+      all: ["distinct_instruments_device >= 4"]
+    action: review
+    severity: medium
+    reason: DEVICE_MANY_PAYMENT_INSTRUMENTS
+    score: 30
+
+  - id: AMOUNT_SPIKE
+    description: Deposit far above the player's own history
+    when:
+      event: deposit_attempt
+      all: ["amount_zscore >= 4", "amount >= 200"]
+    action: step_up_kyc
+    severity: medium
+    reason: AMOUNT_SPIKE_VS_HISTORY
+    score: 30
+
+  - id: NEW_ACCOUNT_HIGH_VALUE
+    description: High-value deposit within the first hour of the account
+    when:
+      event: deposit_attempt
+      all: ["account_age_hours < 1", "amount >= 500"]
+    action: allow
+    severity: low
+    reason: NEW_ACCOUNT_HIGH_VALUE
+    score: 20
+
+  - id: PRIOR_CHARGEBACK
+    description: Any money movement after a chargeback
+    when:
+      event: [deposit_attempt, withdrawal_request]
+      all: ["chargebacks >= 1"]
+    action: block
+    severity: high
+    reason: PRIOR_CHARGEBACK
+    score: 70
+
+  - id: SHARED_INSTRUMENT
+    description: Payment instrument used by more than one player (signal only)
+    when:
+      event: [deposit_attempt, withdrawal_request]
+      all: ["distinct_players_instrument >= 2"]
+    action: allow
+    severity: low
+    reason: SHARED_PAYMENT_INSTRUMENT
+    score: 25
+
+  # ---------------------------------------------------------------- abuse / AML
+  - id: MULTI_ACCOUNT_RING
+    description: Player linked via device/instrument to 2+ other accounts
+    when:
+      event: [bonus_claim, withdrawal_request]
+      all: ["ring_size >= 3"]
+    action: review
+    severity: high
+    reason: MULTI_ACCOUNT_RING
+    score: 35
+
+  - id: BONUS_ABUSE
+    description: Withdrawal with high bonus share and little wagering
+    when:
+      event: withdrawal_request
+      all: ["bonus_to_deposit_ratio >= 0.5", "wagering_ratio < 3"]
+    action: review
+    severity: medium
+    reason: BONUS_ABUSE_LOW_WAGERING
+    score: 30
+
+  - id: CASH_CYCLING
+    description: Deposit -> withdrawal within 24h with almost no wagering (AML typology)
+    when:
+      event: withdrawal_request
+      all: ["wagering_ratio < 0.3", "minutes_since_last_deposit < 1440"]
+    action: review
+    severity: high
+    reason: CASH_CYCLING_LOW_WAGERING
+    score: 40
+
+  - id: COLLUSION_OPPOSITE_BETS
+    description: Linked players repeatedly backing opposite outcomes of the same market
+    when:
+      event: [bet, withdrawal_request]
+      all: ["opposite_bets_linked >= 2"]
+    action: review
+    severity: high
+    reason: COLLUSION_OPPOSITE_BETS
+    score: 40
+
+  - id: P2P_FANOUT
+    description: Peer-to-peer transfers to 3+ counterparties
+    when:
+      event: [p2p_transfer, withdrawal_request]
+      all: ["p2p_counterparties >= 3"]
+    action: review
+    severity: medium
+    reason: P2P_TRANSFER_FANOUT
+    score: 25
+
+  - id: SUBNET_CLUSTER
+    description: Many other players on the same /24 (weak signal, NAT / carriers)
+    when:
+      event: [registration, bonus_claim]
+      all: ["shared_subnet_players >= 6"]
+    action: allow
+    severity: info
+    reason: SUBNET_CLUSTER
+    score: 10
+
+  - id: ACCOUNT_TAKEOVER
+    description: Many failed logins within an hour
+    when:
+      event: login
+      all: ["failed_logins_1h >= 5"]
+    action: step_up_kyc
+    severity: medium
+    reason: ACCOUNT_TAKEOVER_SIGNAL
+    score: 25
