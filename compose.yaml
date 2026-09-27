@@ -1,0 +1,10 @@
+services:
+  fre:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - fre-data:/data
+      - ./rules:/app/rules:ro   # edit rules on the host -> hot reload in the container
+volumes:
+  fre-data:
